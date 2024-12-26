@@ -1,22 +1,18 @@
-from data.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_Pred, Dataset_ECL_hour
-from exp.exp_basic import Exp_Basic
-from models.model import Informer, Yformer, Yformer_skipless
-
-from utils.tools import EarlyStopping, adjust_learning_rate
-from utils.metrics import metric
+import os
+import time
+import warnings
 
 import numpy as np
-
 import torch
 import torch.nn as nn
 from torch import optim
 from torch.utils.data import DataLoader
-from torchinfo import summary
 
-import os
-import time
-
-import warnings
+from data.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_Pred, Dataset_ECL_hour
+from exp.exp_basic import Exp_Basic
+from models.model import Informer, Yformer, Yformer_skipless
+from utils.metrics import metric
+from utils.tools import EarlyStopping, adjust_learning_rate
 
 warnings.filterwarnings('ignore')
 
@@ -61,55 +57,79 @@ class Exp_Informer(Exp_Basic):
         return model
 
     def _get_data(self, flag):
+        """
+        根据任务标志 (flag) 和用户参数初始化数据集和数据加载器。
+
+        参数：
+        - flag: 字符串，表示任务类型，可选值为 'train', 'test', 或 'pred'。
+
+        返回：
+        - data_set: 数据集对象。
+        - data_loader: 数据加载器。
+        """
+        # 获取用户参数
         args = self.args
 
+        # 定义数据集映射表，指定不同数据类型对应的处理类
         data_dict = {
-            'ETTh1': Dataset_ETT_hour,
-            'ETTh2': Dataset_ETT_hour,
-            'ETTm1': Dataset_ETT_minute,
-            'ETTm2': Dataset_ETT_minute,
-            'ECL': Dataset_ECL_hour,
-            'custom': Dataset_Custom,
+            'ETTh1': Dataset_ETT_hour,  # ETT 小时级别数据集 1
+            'ETTh2': Dataset_ETT_hour,  # ETT 小时级别数据集 2
+            'ETTm1': Dataset_ETT_minute,  # ETT 分钟级别数据集 1
+            'ETTm2': Dataset_ETT_minute,  # ETT 分钟级别数据集 2
+            'ECL': Dataset_ECL_hour,  # ECL 数据集（小时级别）
+            'custom': Dataset_Custom,  # 自定义数据集
         }
+
+        # 根据用户参数选择对应的数据集类
         Data = data_dict[self.args.data]
+
+        # 判断时间编码方式：如果嵌入方式为 'timeF'，则 timeenc=1；否则为 0
         timeenc = 0 if args.embed != 'timeF' else 1
 
-        if flag == 'test':
-            shuffle_flag = False;
-            drop_last = True;
-            batch_size = args.batch_size;
-            freq = args.freq
-        elif flag == 'pred':
-            shuffle_flag = False;
-            drop_last = False;
-            batch_size = 1;
-            freq = args.detail_freq
-            Data = Dataset_Pred
-        else:
-            shuffle_flag = True;
-            drop_last = True;
-            batch_size = args.batch_size;
-            freq = args.freq
+        # 根据任务类型 flag 设置数据加载器的参数
+        if flag == 'test':  # 测试集配置
+            shuffle_flag = False  # 测试集不需要打乱顺序
+            drop_last = True  # 丢弃最后一个不完整批次
+            batch_size = args.batch_size  # 使用用户定义的批量大小
+            freq = args.freq  # 数据频率（如 'h' 表示小时，'t' 表示分钟）
+        elif flag == 'pred':  # 预测任务配置
+            shuffle_flag = False  # 预测任务不需要打乱顺序
+            drop_last = False  # 不丢弃最后一个批次
+            batch_size = 1  # 每次预测一个样本
+            freq = args.detail_freq  # 使用更细粒度的频率
+            Data = Dataset_Pred  # 使用专门的预测数据集类
+        else:  # 训练集配置
+            shuffle_flag = True  # 训练集需要打乱顺序
+            drop_last = True  # 丢弃最后一个不完整批次
+            batch_size = args.batch_size  # 使用用户定义的批量大小
+            freq = args.freq  # 数据频率
 
+        # 初始化数据集
         data_set = Data(
-            root_path=args.root_path,
-            data_path=args.data_path,
-            flag=flag,
-            size=[args.seq_len, args.label_len, args.pred_len],
-            features=args.features,
-            target=args.target,
-            use_decoder_tokens=args.use_decoder_tokens,
-            timeenc=timeenc,
-            freq=freq
+            root_path=args.root_path,  # 数据集的根路径
+            data_path=args.data_path,  # 数据文件路径
+            flag=flag,  # 当前任务标志（'train', 'test', 'pred'）
+            size=[args.seq_len, args.label_len, args.pred_len],  # 输入、标签和预测序列长度
+            features=args.features,  # 输入特征类型（如 'M' 表示多变量，'S' 表示单变量）
+            target=args.target,  # 目标变量名
+            use_decoder_tokens=args.use_decoder_tokens,  # 是否使用解码器输入
+            timeenc=timeenc,  # 时间编码类型
+            freq=freq  # 时间频率
         )
-        print(flag, len(data_set))
-        data_loader = DataLoader(
-            data_set,
-            batch_size=batch_size,
-            shuffle=shuffle_flag,
-            num_workers=args.num_workers,
-            drop_last=drop_last)
 
+        # 打印任务标志和数据集大小
+        print(flag, len(data_set))
+
+        # 初始化数据加载器
+        data_loader = DataLoader(
+            data_set,  # 数据集
+            batch_size=batch_size,  # 批量大小
+            shuffle=shuffle_flag,  # 是否打乱顺序
+            num_workers=args.num_workers,  # 数据加载的线程数
+            drop_last=drop_last  # 是否丢弃最后一个不完整批次
+        )
+
+        # 返回数据集对象和数据加载器
         return data_set, data_loader
 
     def _select_optimizer(self):
