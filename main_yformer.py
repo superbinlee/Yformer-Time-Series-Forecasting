@@ -1,6 +1,5 @@
-import argparse
-import os
 import torch
+import argparse
 
 from exp.exp_informer import Exp_Informer
 
