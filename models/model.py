@@ -450,7 +450,7 @@ class Yformer(nn.Module):
         # 将解码器输出通过 `pred_len_projection` 映射到输入序列部分的特征，并截取最后 `seq_len` 长度。
         pre_len_dec_out = self.seq_len_projection(dec_out)[:, -(self.pred_len):, :]
         # 将解码器输出通过 `seq_len_projection` 映射到预测序列部分的特征，并截取最后 `pred_len` 长度。
-        # 合并输入和预测部分
+                # Unet: 合并输入和预测部分，这里体现了Unet的思想，跳跃连接：通过 x_list 和 fut_x_list 的传递，解码器结合了编码器和未来编码器的多尺度特征。
         dec_out = torch.cat((seq_len_dec_out, pre_len_dec_out), dim=1)
         # 将输入序列特征部分和预测序列特征部分在序列维度上拼接，形成完整的解码器输出。
         if self.output_attention:
