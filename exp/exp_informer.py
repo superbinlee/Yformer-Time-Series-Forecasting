@@ -140,258 +140,163 @@ class Exp_Informer(Exp_Basic):
         criterion = nn.MSELoss()
         return criterion
 
-    def vali(self, vali_data, vali_loader, criterion):
-        self.model.eval()
-        total_loss = []
-        for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
-            batch_x = batch_x.float().to(self.device)
-            batch_y = batch_y.float()
+    def vali(self, vali_data, vali_loader, criterion):  # 验证函数，用于评估模型在验证集上的表现
+        self.model.eval()  # 设置模型为评估模式，禁用 dropout 和 batch normalization
+        total_loss = []  # 存储每个 batch 的损失
+        for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):  # 遍历验证集数据加载器
+            batch_x = batch_x.float().to(self.device)  # 将输入数据 batch_x 转为 float 类型并加载到指定设备
+            batch_y = batch_y.float()  # 将目标数据 batch_y 转为 float 类型
+            batch_x_mark = batch_x_mark.float().to(self.device)  # 时间戳标记 batch_x_mark 转为 float 并加载到设备
+            batch_y_mark = batch_y_mark.float().to(self.device)  # 时间戳标记 batch_y_mark 转为 float 并加载到设备
 
-            batch_x_mark = batch_x_mark.float().to(self.device)
-            batch_y_mark = batch_y_mark.float().to(self.device)
+            dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()  # 初始化解码器输入为零张量，形状与目标预测部分一致
 
-            # decoder input
-            dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-
-            if self.args.use_decoder_tokens:
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+            if self.args.use_decoder_tokens:  # 如果解码器需要使用之前时间步的标记
+                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)  # 拼接目标前 label_len 部分和零张量
             else:
-                dec_inp = dec_inp.float().to(self.device)
+                dec_inp = dec_inp.float().to(self.device)  # 否则直接将零张量加载到设备
 
-            # encoder - decoder
-            if self.args.use_amp:
-                with torch.cuda.amp.autocast():
-                    if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+            if self.args.use_amp:  # 如果启用了自动混合精度
+                with torch.cuda.amp.autocast():  # 自动混合精度上下文
+                    if self.args.output_attention:  # 如果需要输出注意力
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]  # 获取模型输出
                     else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[:, -self.args.pred_len:, :]
-            else:
-                if self.args.output_attention:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[:, -self.args.pred_len:, :]  # 获取最后预测部分输出
+            else:  # 如果未启用混合精度
+                if self.args.output_attention:  # 如果需要输出注意力
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]  # 获取模型输出
                 else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[:, -self.args.pred_len:, :]
-            f_dim = -1 if self.args.features == 'MS' else 0
-            batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[:, -self.args.pred_len:, :]  # 获取最后预测部分输出
 
-            pred = outputs.detach().cpu()
-            true = batch_y.detach().cpu()
+            f_dim = -1 if self.args.features == 'MS' else 0  # 确定目标维度，'MS' 时选择最后一维，否则选择第 0 维
+            batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)  # 选取目标序列预测部分并加载到设备
 
-            loss = criterion(pred, true)
+            pred = outputs.detach().cpu()  # 将预测结果从计算图中分离并转移到 CPU
+            true = batch_y.detach().cpu()  # 将真实值从计算图中分离并转移到 CPU
 
-            total_loss.append(loss)
-        total_loss = np.average(total_loss)
-        self.model.train()
-        return total_loss
+            loss = criterion(pred, true)  # 计算当前 batch 的损失
+            total_loss.append(loss)  # 将损失添加到 total_loss 列表中
 
-    def train(self, setting):
-        train_data, train_loader = self._get_data(flag='train')
-        vali_data, vali_loader = self._get_data(flag='val')
-        test_data, test_loader = self._get_data(flag='test')
+        total_loss = np.average(total_loss)  # 计算平均损失
+        self.model.train()  # 恢复模型为训练模式
+        return total_loss  # 返回验证集平均损失
 
-        path = os.path.join(self.args.checkpoints, setting)
-        if not os.path.exists(path):
-            os.makedirs(path)
+    def train(self, setting):  # 训练函数，执行训练、验证和测试的完整过程
+        train_data, train_loader = self._get_data(flag='train')  # 获取训练数据和数据加载器
+        vali_data, vali_loader = self._get_data(flag='val')  # 获取验证数据和数据加载器
+        test_data, test_loader = self._get_data(flag='test')  # 获取测试数据和数据加载器
+        path = os.path.join(self.args.checkpoints, setting)  # 定义模型保存路径
+        if not os.path.exists(path): os.makedirs(path)  # 如果路径不存在，创建路径
+        time_now = time.time()  # 记录当前时间
+        train_steps = len(train_loader)  # 获取训练数据的总步数
+        early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)  # 初始化早停机制
+        model_optim = self._select_optimizer()  # 选择优化器
+        criterion = self._select_criterion()  # 选择损失函数
+        if self.args.use_amp: scaler = torch.cuda.amp.GradScaler()  # 如果使用自动混合精度，初始化 GradScaler
 
-        time_now = time.time()
-
-        train_steps = len(train_loader)
-        early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
-
-        model_optim = self._select_optimizer()
-        criterion = self._select_criterion()
-
-        if self.args.use_amp:
-            scaler = torch.cuda.amp.GradScaler()
-
-        # for i, (batch_x,batch_y,batch_x_mark,batch_y_mark) in enumerate(train_loader):
-        #     summary(self.model,  [batch_x.shape, batch_x_mark.shape, batch_y.shape, batch_y_mark.shape]) # show the size 
-        #     break
-
-        for epoch in range(self.args.train_epochs):
-            iter_count = 0
-            train_loss = []
-            auto_train_loss = []
-            combined_train_loss = []
-            self.model.train()
-            epoch_time = time.time()
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
-                iter_count += 1
-
-                model_optim.zero_grad()
-
-                batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float()
-
-                batch_x_mark = batch_x_mark.float().to(self.device)
-                batch_y_mark = batch_y_mark.float().to(self.device)
-
-                # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-
-                if self.args.use_decoder_tokens:
-                    dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-                else:
-                    dec_inp = dec_inp.float().to(self.device)
-
-                if self.args.output_attention:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-
-                f_dim = -1 if self.args.features == 'MS' else 0
-                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                auto_loss = criterion(outputs[:, :-self.args.pred_len, :], batch_x)
-                auto_train_loss.append(auto_loss.item())
-                loss = criterion(outputs[:, -self.args.pred_len:, :], batch_y)
-                train_loss.append(loss.item())
-
-                combined_loss = self.args.alpha * auto_loss + (1 - self.args.alpha) * loss
-                combined_train_loss.append(combined_loss.item())
-
-                if (i + 1) % 100 == 0:
+        for epoch in range(self.args.train_epochs):  # 迭代每个训练轮次
+            iter_count, train_loss, auto_train_loss, combined_train_loss = 0, [], [], []  # 初始化迭代计数器和损失记录
+            self.model.train()  # 设置模型为训练模式
+            epoch_time = time.time()  # 记录当前轮次的起始时间
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):  # 遍历训练数据加载器
+                iter_count += 1  # 更新迭代计数器
+                model_optim.zero_grad()  # 清除优化器的梯度
+                batch_x, batch_y = batch_x.float().to(self.device), batch_y.float()  # 加载输入数据和目标数据到设备
+                batch_x_mark, batch_y_mark = batch_x_mark.float().to(self.device), batch_y_mark.float().to(self.device)  # 加载时间标记到设备
+                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()  # 初始化解码器输入为零张量
+                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device) if self.args.use_decoder_tokens else dec_inp.float().to(self.device)  # 如果启用解码器标记，拼接标记
+                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0] if self.args.output_attention else self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)  # 根据设置选择是否输出注意力
+                f_dim = -1 if self.args.features == 'MS' else 0  # 确定目标特征维度
+                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)  # 获取目标序列的预测部分
+                auto_loss = criterion(outputs[:, :-self.args.pred_len, :], batch_x)  # 计算自回归损失
+                auto_train_loss.append(auto_loss.item())  # 记录自回归损失
+                loss = criterion(outputs[:, -self.args.pred_len:, :], batch_y)  # 计算预测损失
+                train_loss.append(loss.item())  # 记录预测损失
+                combined_loss = self.args.alpha * auto_loss + (1 - self.args.alpha) * loss  # 计算组合损失
+                combined_train_loss.append(combined_loss.item())  # 记录组合损失
+                if (i + 1) % 100 == 0:  # 每 100 步打印一次日志
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f} | auto loss: {3:.7f} | comb loss: {4:.7f}".format(i + 1, epoch + 1, loss.item(), auto_loss.item(), combined_loss.item()))
-                    speed = (time.time() - time_now) / iter_count
-                    left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
-                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
-                    iter_count = 0
-                    time_now = time.time()
+                    speed = (time.time() - time_now) / iter_count  # 计算训练速度
+                    left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)  # 估算剩余时间
+                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))  # 打印速度和剩余时间
+                    iter_count, time_now = 0, time.time()  # 重置计数器和时间记录
+                combined_loss.backward()  # 反向传播计算梯度
+                model_optim.step()  # 更新模型参数
+            print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))  # 打印当前轮次的耗时
+            train_loss, auto_loss, combined_loss = np.average(train_loss), np.average(auto_train_loss), np.average(combined_train_loss)  # 计算平均损失
+            vali_loss, test_loss = self.vali(vali_data, vali_loader, criterion), self.vali(test_data, test_loader, criterion)  # 验证和测试损失
+            print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} | Auto Loss : {3:.7f} | Comb Loss : {4:.7f}, Vali Loss: {5:.7f} Test Loss: {6:.7f}".format(epoch + 1, train_steps, train_loss, auto_loss, combined_loss, vali_loss, test_loss))  # 打印损失信息
+            early_stopping(vali_loss, self.model, path)  # 检查早停条件
+            if early_stopping.early_stop: print("Early stopping"); break  # 如果满足早停条件，停止训练
+            adjust_learning_rate(model_optim, epoch + 1, self.args)  # 调整学习率
+        best_model_path = path + '/' + 'checkpoint.pth'  # 加载最优模型的保存路径
+        self.model.load_state_dict(torch.load(best_model_path))  # 加载最优模型参数
+        return self.model  # 返回训练好的模型
 
-                combined_loss.backward()
-                model_optim.step()
-            print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
-            train_loss = np.average(train_loss)
-            auto_loss = np.average(auto_train_loss)
-            combined_loss = np.average(combined_train_loss)
-            vali_loss = self.vali(vali_data, vali_loader, criterion)
-            test_loss = self.vali(test_data, test_loader, criterion)
+    def test(self, setting):  # 测试函数，用于评估模型在测试集上的性能
+        test_data, test_loader = self._get_data(flag='test')  # 获取测试数据和数据加载器
+        self.model.eval()  # 将模型设置为评估模式，禁用 dropout 和 batch normalization
+        preds, trues = [], []  # 初始化存储预测值和真实值的列表
 
-            print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} | Auto Loss : {3:.7f} | Comb Loss : {4:.7f}, Vali Loss: {5:.7f} Test Loss: {6:.7f}".format(
-                epoch + 1, train_steps, train_loss, auto_loss, combined_loss, vali_loss, test_loss))
-            early_stopping(vali_loss, self.model, path)
-            if early_stopping.early_stop:
-                print("Early stopping")
-                break
+        for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):  # 遍历测试数据加载器
+            batch_x, batch_y = batch_x.float().to(self.device), batch_y.float()  # 将输入数据和目标数据加载到设备
+            batch_x_mark, batch_y_mark = batch_x_mark.float().to(self.device), batch_y_mark.float().to(self.device)  # 加载时间标记到设备
+            dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()  # 初始化解码器输入为零张量
+            dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device) if self.args.use_decoder_tokens else dec_inp.float().to(self.device)  # 根据设置拼接解码器输入
 
-            adjust_learning_rate(model_optim, epoch + 1, self.args)
+            if self.args.use_amp:  # 如果启用自动混合精度
+                with torch.cuda.amp.autocast():  # 在混合精度上下文中执行模型
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0] if self.args.output_attention else self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[:, -self.args.pred_len:, :]  # 获取输出
+            else:  # 未启用混合精度
+                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0] if self.args.output_attention else self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[:, -self.args.pred_len:, :]  # 获取输出
 
-        best_model_path = path + '/' + 'checkpoint.pth'
-        self.model.load_state_dict(torch.load(best_model_path))
+            f_dim = -1 if self.args.features == 'MS' else 0  # 确定目标特征维度，'MS' 表示最后一维，其他情况为第 0 维
+            batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)  # 获取目标序列的预测部分
+            pred, true = outputs.detach().cpu().numpy(), batch_y.detach().cpu().numpy()  # 将预测结果和真实值从计算图中分离并转为 NumPy 数组
+            preds.append(pred)  # 保存预测结果
+            trues.append(true)  # 保存真实值
 
-        return self.model
+        preds, trues = np.array(preds), np.array(trues)  # 将预测值和真实值转换为 NumPy 数组
+        print('test shape:', preds.shape, trues.shape)  # 打印测试数据形状
+        preds, trues = preds.reshape(-1, preds.shape[-2], preds.shape[-1]), trues.reshape(-1, trues.shape[-2], trues.shape[-1])  # 调整数组形状
+        print('test shape:', preds.shape, trues.shape)  # 打印调整后的形状
+        folder_path = './results/' + setting + '/'  # 定义结果保存路径
+        if not os.path.exists(folder_path): os.makedirs(folder_path)  # 如果路径不存在，则创建
+        mae, mse, rmse, mape, mspe = metric(preds, trues)  # 计算评估指标
+        print('mse:{}, mae:{}'.format(mse, mae))  # 打印 MSE 和 MAE
+        np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))  # 保存评估指标
+        np.save(folder_path + 'pred.npy', preds)  # 保存预测结果
+        np.save(folder_path + 'true.npy', trues)  # 保存真实值
+        return  # 返回
 
-    def test(self, setting):
-        test_data, test_loader = self._get_data(flag='test')
 
-        self.model.eval()
+def predict(self, setting, load=False):  # 预测函数，用于生成未来数据的预测值
+    pred_data, pred_loader = self._get_data(flag='pred')  # 获取预测数据和数据加载器
+    if load:  # 如果需要加载模型权重
+        path = os.path.join(self.args.checkpoints, setting)  # 获取模型检查点路径
+        best_model_path = path + '/' + 'checkpoint.pth'  # 拼接检查点文件路径
+        self.model.load_state_dict(torch.load(best_model_path))  # 加载模型权重
+    self.model.eval()  # 将模型设置为评估模式
+    preds = []  # 初始化预测结果列表
 
-        preds = []
-        trues = []
+    for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(pred_loader):  # 遍历预测数据加载器
+        batch_x, batch_y = batch_x.float().to(self.device), batch_y.float()  # 将输入数据和目标数据加载到设备
+        batch_x_mark, batch_y_mark = batch_x_mark.float().to(self.device), batch_y_mark.float().to(self.device)  # 加载时间标记到设备
+        dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()  # 初始化解码器输入为零张量
+        dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device) if self.args.use_decoder_tokens else dec_inp.float().to(self.device)  # 根据设置拼接解码器输入
+        if self.args.use_amp:  # 如果启用自动混合精度
+            with torch.cuda.amp.autocast():  # 在混合精度上下文中执行模型
+                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0] if self.args.output_attention else self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)  # 获取输出
+        else:  # 未启用混合精度
+            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0] if self.args.output_attention else self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)  # 获取输出
+        f_dim = -1 if self.args.features == 'MS' else 0  # 确定目标特征维度，'MS' 表示最后一维，其他情况为第 0 维
+        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)  # 获取目标序列的预测部分
+        pred = outputs.detach().cpu().numpy()  # 将预测结果从计算图中分离并转为 NumPy 数组
+        preds.append(pred)  # 保存预测结果
 
-        for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
-            batch_x = batch_x.float().to(self.device)
-            batch_y = batch_y.float()
-            batch_x_mark = batch_x_mark.float().to(self.device)
-            batch_y_mark = batch_y_mark.float().to(self.device)
-
-            # decoder input
-            dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-            if self.args.use_decoder_tokens:
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-            else:
-                dec_inp = dec_inp.float().to(self.device)
-            # encoder - decoder
-            if self.args.use_amp:
-                with torch.cuda.amp.autocast():
-                    if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                    else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[:, -self.args.pred_len:, :]
-            else:
-                if self.args.output_attention:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[:, -self.args.pred_len:, :]
-            f_dim = -1 if self.args.features == 'MS' else 0
-            batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-
-            pred = outputs.detach().cpu().numpy()  # .squeeze()
-            true = batch_y.detach().cpu().numpy()  # .squeeze()
-
-            preds.append(pred)
-            trues.append(true)
-
-        preds = np.array(preds)
-        trues = np.array(trues)
-        print('test shape:', preds.shape, trues.shape)
-        preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
-        trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
-        print('test shape:', preds.shape, trues.shape)
-
-        # result save
-        folder_path = './results/' + setting + '/'
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
-
-        mae, mse, rmse, mape, mspe = metric(preds, trues)
-        print('mse:{}, mae:{}'.format(mse, mae))
-
-        np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
-        np.save(folder_path + 'pred.npy', preds)
-        np.save(folder_path + 'true.npy', trues)
-
-        return
-
-    def predict(self, setting, load=False):
-        pred_data, pred_loader = self._get_data(flag='pred')
-
-        if load:
-            path = os.path.join(self.args.checkpoints, setting)
-            best_model_path = path + '/' + 'checkpoint.pth'
-            self.model.load_state_dict(torch.load(best_model_path))
-
-        self.model.eval()
-
-        preds = []
-
-        for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(pred_loader):
-            batch_x = batch_x.float().to(self.device)
-            batch_y = batch_y.float()
-            batch_x_mark = batch_x_mark.float().to(self.device)
-            batch_y_mark = batch_y_mark.float().to(self.device)
-
-            # decoder input
-            dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-            if self.args.use_decoder_tokens:
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-            else:
-                dec_inp = dec_inp.float().to(self.device)
-            # encoder - decoder
-            if self.args.use_amp:
-                with torch.cuda.amp.autocast():
-                    if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                    else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-            else:
-                if self.args.output_attention:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-            f_dim = -1 if self.args.features == 'MS' else 0
-            batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-
-            pred = outputs.detach().cpu().numpy()  # .squeeze()
-
-            preds.append(pred)
-
-        preds = np.array(preds)
-        preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
-
-        # result save
-        folder_path = './results/' + setting + '/'
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
-
-        np.save(folder_path + 'real_prediction.npy', preds)
-
-        return
+    preds = np.array(preds)  # 将预测列表转为 NumPy 数组
+    preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])  # 调整预测结果的形状
+    folder_path = './results/' + setting + '/'  # 定义结果保存路径
+    if not os.path.exists(folder_path): os.makedirs(folder_path)  # 如果路径不存在，则创建
+    np.save(folder_path + 'real_prediction.npy', preds)  # 保存预测结果为 NumPy 文件
+    return  # 返回
